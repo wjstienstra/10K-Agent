@@ -1,6 +1,7 @@
 .env
 .venv/
 db/
+data/
 sec-edgar-filings/
 __pycache__/
 *.pyc
