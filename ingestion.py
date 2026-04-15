@@ -92,7 +92,7 @@ def run_multi_year_ingestion(directory_path, ticker, status_element=None):
         return
 
     # Splitting & Database
-    splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=4000, chunk_overlap=400)
     chunks = splitter.split_documents(all_documents)
     
     print(f"🚀 Database vullen voor {ticker} met {len(chunks)} fragmenten...")

@@ -1,4 +1,3 @@
-import os
 import time
 import re
 from dotenv import load_dotenv
@@ -8,22 +7,24 @@ from langchain_community.vectorstores import Chroma
 
 load_dotenv()
 
-# De Ultimate Hedge Fund Analyst Prompt
+# De Verbeterde Nederlandse Hedge Fund Analyst Prompt
 MASTER_INVESTMENT_PROMPT = """
-Je bent een Senior Hedge Fund Analyst. Je krijgt fragmenten uit 10-K jaarverslagen van de afgelopen 5 jaar. 
-Schrijf een kritisch investeringsmemo.
+ROL: Je bent een Senior Equity Research Analyst, gespecialiseerd in SEC 10-K analyses.
+TAAK: Schrijf een kritisch en feitelijk investeringsmemo op basis van de verstrekte documentfragmenten.
+
+STRIKTE RICHTLIJNEN:
+1. TAAL: Reageer uitsluitend in het Nederlands.
+2. BRONVERMELDING: Gebruik alleen de verstrekte context. Citeer jaartallen (bijv. "In 2023...").
+3. INTEGRITEIT: Als specifieke data (zoals 'Net Debt' of een margenummer) niet in de fragmenten staat, schrijf dan "Niet aangetroffen in de verstrekte context". Ga NIET schatten of hallucineren.
+4. TOON: Zakelijk, objectief en kritisch.
+5. DATA-DETECTIE: Zoek specifiek naar getallenreeksen die volgen na woorden als 'Revenue', 'Operating Income' of 'Net Income'. De getallen staan vaak verderop in de tekst door de conversie.
 
 STRUCTUUR:
-1. **Financiële Snapshot (Tabel):** Maak een tabel met Revenue, Gross Margin (%), Operating Income en Net Debt voor alle beschikbare jaren.
-2. **De 'Moat' & Business Model:** Hoe beschermt het bedrijf zijn winst? Wordt de competitieve positie sterker of zwakker?
-3. **Kapitaalallocatie:** Waar gaat het geld heen? (R&D, Buybacks, Overnames). Is dit in het belang van de aandeelhouder?
-4. **Risico-Audit:** Zoek naar veranderende risico's in de laatste 2 jaar (AI, regelgeving, concurrentie).
-5. **Conclusie:** Kwaliteit van de winst en fase-classificatie [Growth / Mature / Cyclical / Turnaround].
+1. **Financiële Snapshot (Tabel)**: Maak een tabel met de kolommen [Jaar, Omzet, Operationeel Inkomen, Brutomarge %, Vrije Kasstroom].
+2. **Economische Moat**: Evalueer het concurrentievoordeel (Netwerkeffecten, Wisselkosten, Merksterkte, of Kostenvoordeel).
+3. **Risico-Audit**: Benoem de 3 belangrijkste risico's die expliciet in de documenten worden genoemd.
+4. **Conclusie**: Classificatie (Groei / Volwassen / Risicovol) + een korte onderbouwing van één zin.
 
-RICHTLIJNEN:
-- Citeer jaartallen (bijv. "In 2022...").
-- Wees kritisch en zakelijk.
-- Gebruik Markdown voor een strakke opmaak.
 """
 
 def clean_document_content(doc):
@@ -35,10 +36,13 @@ def clean_document_content(doc):
         if marker in content:
             content = content.split(marker)[0]
     
-    # 2. Verwijder HTML-achtige tags die vaak in SEC-filings blijven hangen
+    # 2. Verwijder HTML-achtige tags
     content = re.sub(r'<[^>]*>', '', content)
+
+    content = re.sub(r'[a-z]+:[a-z]+="[^"]*"', '', content) 
+    content = re.sub(r'\{[^\}]*\}', '', content) # Verwijder JSON-achtige restanten
     
-    # 3. Verwijder extreem lange strings zonder spaties (zoals base64 signatures)
+    # 3. Verwijder extreem lange strings (base64/signatures)
     words = content.split()
     clean_words = [w for w in words if len(w) < 50]
     content = " ".join(clean_words)
@@ -53,70 +57,81 @@ def get_comprehensive_analysis(company_id):
     if count == 0:
         return "❌ Fout: De database is leeg of de collectie-naam matcht niet."
 
-    print(f"🕵️ Agent start onderzoek in {count} fragmenten...")
-
-    # VERBETERING: Meer fragmenten (k=10) nu de data schoon is.
-    # We zoeken nu specifiek naar de 'Selected Financial Data' tabelkoppen.
+    # Slimme zoekopdrachten
     numeric_docs = vector_db.similarity_search(
-        "Financial Highlights Table Selected Financial Data Revenue Net Income Operating Income Cash Flow Balance Sheet", 
-        k=6
+        "Item 8. Financial Statements and Supplementary Data CONSOLIDATED STATEMENTS OF INCOME Fiscal Year Ended December", 
+        k=10
     )
-    
+
+    # Zoekopdracht 2: Focus op de business kwaliteit (Item 1 & 1A in 10-K)
     strategy_docs = vector_db.similarity_search(
-        "Business strategy item 1A risk factors competition moat product development AI innovation", 
-        k=6
+        "Business Overview, Item 1, Competitive Moat, Trademarks, Competition and Risk Factors", 
+        k=5
     )
     
-    # Combineer en sorteer de documenten op jaar uit de metadata
     all_docs = numeric_docs + strategy_docs
     all_docs.sort(key=lambda x: x.metadata.get('year', '0000'))
     
-    # --- DATA SANITIZATION LAYER ---
     context_list = []
     for d in all_docs:
         clean_text = clean_document_content(d)
         year = d.metadata.get('year', 'Onbekend')
-        # We voegen een duidelijke kop toe per fragment
         context_list.append(f"--- DOCUMENT FRAGMENT JAAR {year} ---\n{clean_text}")
     
     context = "\n\n".join(context_list)
     
-    # We voegen een extra instructie toe aan de prompt om 'N/A' te vermijden
     enhanced_prompt = f"""
     CONTEXT UIT 10-K DOCUMENTEN:
     {context}
-    
-    BELANGRIJKE INSTRUCTIE: 
-    Kijk goed naar de fragmenten gemarkeerd met 'DOCUMENT FRAGMENT JAAR'. 
-    Probeer de numerieke waarden uit de tekst en tabellen te extraheren voor de gevraagde tabel.
     
     OPDRACHT:
     {MASTER_INVESTMENT_PROMPT}
     """
 
-    MODELS = ["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    # Flash-1.5 is momenteel de meest stabiele keuze voor RAG-synthese
+    MODELS = ["gemini-flash-latest", "gemini-pro-latest"]
     
     for model_name in MODELS:
         try:
-            # We verlagen de temperature nog iets meer voor maximale feitelijke nauwkeurigheid
-            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.0) 
+            llm = ChatGoogleGenerativeAI(
+                model=model_name, 
+                temperature=0.0, 
+                timeout=120, 
+                max_retries=3
+            ) 
             response = llm.invoke(enhanced_prompt)
             
-            final_answer = response.content 
+            # Fix voor 'list object' error: dwing content naar string
+            if hasattr(response, 'content'):
+                raw_content = response.content
+                if isinstance(raw_content, list):
+                    final_answer = ""
+                    for item in raw_content:
+                        if isinstance(item, dict) and 'text' in item:
+                            final_answer += item['text']
+                    if not final_answer:
+                        final_answer = str(raw_content)
+                else:
+                    final_answer = str(raw_content)
+            else:
+                final_answer = str(response)
+
             return final_answer.replace("$", "\\$")
             
         except Exception as e:
-            if "429" in str(e):
-                continue
             if model_name == MODELS[-1]:
                 raise e
+            time.sleep(2)
+            continue
 
 def ask_ai_question(company_id, user_question):
-    """Beantwoordt een specifieke vraag over de opgeslagen 10-K's met cleanup."""
+    """Beantwoordt vragen en extraheert de ticker uit de company_id."""
+    # Fix: Definieer ticker voor gebruik in de prompt
+    ticker = company_id.replace("_report", "").upper()
+    
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     vector_db = Chroma(persist_directory="./db", embedding_function=embeddings, collection_name=company_id)
     
-    # We zoeken nu in de 'schone' database
     docs = vector_db.similarity_search(user_question, k=5)
     
     context_list = []
@@ -127,27 +142,35 @@ def ask_ai_question(company_id, user_question):
     context = "\n\n".join(context_list)
     
     chat_prompt = f"""
-    Je bent een behulpzame AI-analist. Gebruik de onderstaande fragmenten uit 10-K jaarverslagen. 
-    Citeer altijd het jaartal van je bron.
+    Je bent een feitelijke SEC-assistent. Je taak is om de vraag van de gebruiker te beantwoorden 
+    op basis van de onderstaande 10-K fragmenten van {ticker}.
+
+    REGELS:
+    1. ANTWOORD ALTIJD IN HET NEDERLANDS.
+    2. Als het antwoord niet in de verstrekte tekst staat, zeg dan: "Ik kan het antwoord op deze vraag niet vinden in de geanalyseerde jaarverslagen van {ticker}."
+    3. Citeer altijd het jaar van de bron: (Bron: 2023).
+    4. Gebruik geen externe kennis over het bedrijf die niet in de fragmenten staat.
 
     CONTEXT:
     {context}
 
-    VRAAG:
+    VRAAG VAN GEBRUIKER:
     {user_question}
     """
     
-    # Gebruik Flash voor snelheid in de chat
-    llm = ChatGoogleGenerativeAI(model="gemini-flash-lite-latest", temperature=0.3)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash-latest", 
+        temperature=0.3,
+        timeout=60
+    )
     response = llm.invoke(chat_prompt)
     
-    # CRUCIAL: Pak alleen de tekstuele content
+    # Fix voor 'list object' error: dwing content naar string
     if hasattr(response, 'content'):
-        content = response.content
+        content = str(response.content)
     else:
         content = str(response)
         
     return content.replace("$", "\\$")
 
-# Voor compatibiliteit met app.py
 get_analysis_section = lambda cid, sec: get_comprehensive_analysis(cid)

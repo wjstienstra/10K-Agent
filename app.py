@@ -1,12 +1,16 @@
 import streamlit as st
 import os
-import time
 from ingestion import run_multi_year_ingestion
 from tools import fetch_multi_year_10k, get_all_sec_tickers
 from main import get_comprehensive_analysis, ask_ai_question
 
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="Equity Research AI", layout="wide", page_icon="📈")
+
+# Helper om chat te resetten
+def reset_chat():
+    if "messages" in st.session_state:
+        st.session_state.messages = []
 
 # Helper om jaren te tonen
 def get_indexed_years(ticker):
@@ -60,11 +64,13 @@ if 'auto_analyze' not in st.session_state:
 with st.sidebar:
     st.header("🏢 Bedrijf Selecteren")
     
+    # We voegen een callback toe om de chat te resetten bij een nieuwe selectie
     selected_option = st.selectbox(
         "Zoek een ticker:",
         options=all_tickers,
         index=None,
-        placeholder="Typ bijv. 'NVIDIA'..."
+        placeholder="Typ bijv. 'NVIDIA'...",
+        on_change=reset_chat
     )
     
     if selected_option:
@@ -86,13 +92,14 @@ with st.sidebar:
             st.info(f"💡 {ticker} moet nog geïndexeerd worden.")
             if st.button("📥 Download & Indexeer", type="primary"):
                 with st.status(f"Project {ticker} initialiseren...", expanded=True) as s:
-                    s.write(f"🌐 Stap 1: Data ophalen...")
+                    s.write(f"🌐 Stap 1: Data ophalen van SEC EDGAR...")
                     data_path = fetch_multi_year_10k(ticker, amount=lookback_years)
                     
-                    s.write("✂️ Stap 2: Indexeren (CPU intensief)...")
+                    s.write("✂️ Stap 2: Documenten parsen en opschonen (BeautifulSoup)...")
+                    s.write("🧠 Stap 3: Vectoren genereren en opslaan in ChromaDB...")
                     run_multi_year_ingestion(data_path, ticker, status_element=s)
                     
-                    s.update(label=f"✅ {ticker} is gereed!", state="complete")
+                    s.update(label=f"✅ {ticker} is gereed voor analyse!", state="complete")
                 
                 st.session_state.auto_analyze = True
                 st.rerun()
@@ -101,37 +108,45 @@ with st.sidebar:
             if st.button("🚀 Start Analyse"):
                 st.session_state.auto_analyze = True
 
-# --- HOOFDSCHERM: AUTOMATISCHE ANALYSE ---
+# --- HOOFDSCHERM: AUTOMATISCHE ANALYSE MET STATUS UPDATES ---
 if ticker and (st.session_state.auto_analyze or check_if_indexed(ticker)):
     st.header(f"Strategisch Rapport: {selected_option}")
     
     try:
-        with st.spinner(f"Agent voert deep-dive uit op {ticker}..."):
+        # GEBRUIK VAN ST.STATUS VOOR BETERE USER FEEDBACK
+        with st.status(f"Analist voert onderzoek uit op {ticker}...", expanded=True) as status:
+            status.write("🔍 Relevante tekstfragmenten ophalen uit vector database...")
             company_id = f"{ticker.upper()}_report"
+            
+            status.write("📊 Financiële metrics en strategische context extraheren...")
+            # De daadwerkelijke AI aanroep
             report_text = get_comprehensive_analysis(company_id)
 
-            # EXTRA VEILIGHEID: Dwing output naar tekst als het een dictionary/lijst is
-            if isinstance(report_text, list):
-                report_text = report_text[0]
+            status.write("✍️ Investeringsmemo synthetiseren...")
+            
+            # Opschonen van output
+            if isinstance(report_text, list): report_text = report_text[0]
             if isinstance(report_text, dict):
                 report_text = report_text.get('text', report_text.get('content', str(report_text)))
             
-            with st.container():
-                st.markdown(f"### 📈 Fundamentele Analyse: {ticker}")
-                available_years = get_indexed_years(ticker)
-                st.caption(f"Geanalyseerde periodes: {', '.join(available_years)}")
-                
-                st.info("De AI heeft specifiek gezocht naar 'Consolidated Statements' en 'Item 1A' risico's.")
-                st.markdown(report_text)
+            status.update(label="Onderzoek afgerond!", state="complete", expanded=False)
+
+        with st.container():
+            st.markdown(f"### 📈 Fundamentele Analyse: {ticker}")
+            available_years = get_indexed_years(ticker)
+            st.caption(f"Geanalyseerde periodes: {', '.join(available_years)}")
             
-            st.divider()
-            st.download_button(
-                label="💾 Download Volledig Rapport",
-                data=report_text,
-                file_name=f"Analyse_{ticker}_MultiYear.txt",
-                mime="text/plain"
-            )
-            st.session_state.auto_analyze = False
+            st.info("De AI heeft specifiek gezocht naar 'Consolidated Statements' en 'Item 1A' risico's.")
+            st.markdown(report_text)
+        
+        st.divider()
+        st.download_button(
+            label="💾 Download Volledig Rapport",
+            data=report_text,
+            file_name=f"Analyse_{ticker}_MultiYear.txt",
+            mime="text/plain"
+        )
+        st.session_state.auto_analyze = False
             
     except Exception as e:
         st.error(f"Fout tijdens de synthese: {e}")
@@ -155,16 +170,18 @@ if ticker and check_if_indexed(ticker):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("AI onderzoekt documenten..."):
+            # OOK HIER FEEDBACK VOOR DE GEBRUIKER
+            with st.status("Analist raadpleegt jaarverslagen...", expanded=False) as s:
                 try:
-                    company_id = f"{ticker}_report"
+                    company_id = f"{ticker.upper()}_report"
                     answer = ask_ai_question(company_id, prompt)
                     
-                    # Ook hier opschonen van eventuele object-output
                     if isinstance(answer, dict):
                         answer = answer.get('text', str(answer))
-                        
+                    
+                    s.update(label="Antwoord gevonden!", state="complete")
                     st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                 except Exception as e:
+                    s.update(label="Fout bij opvragen", state="error")
                     st.error(f"Chatfout: {e}")
