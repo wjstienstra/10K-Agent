@@ -25,6 +25,8 @@ STRUCTUUR:
 3. **Risico-Audit**: Benoem de 3 belangrijkste risico's die expliciet in de documenten worden genoemd.
 4. **Conclusie**: Classificatie (Groei / Volwassen / Risicovol) + een korte onderbouwing van één zin.
 
+LET OP: Financiële tabellen kunnen door de extractie verminkt zijn (cijfers achter elkaar in plaats van in kolommen). Zoek naar patronen zoals 'Revenue ... [cijfer1] [cijfer2] [cijfer3]' waarbij de cijfers van rechts naar links vaak 2024, 2023, 2022 vertegenwoordigen.
+
 """
 
 def clean_document_content(doc):
@@ -58,9 +60,10 @@ def get_comprehensive_analysis(company_id):
         return "❌ Fout: De database is leeg of de collectie-naam matcht niet."
 
     # Slimme zoekopdrachten
+    # We zoeken specifiek op de exacte kop van Item 8 (de financiele sectie)
     numeric_docs = vector_db.similarity_search(
-        "Item 8. Financial Statements and Supplementary Data CONSOLIDATED STATEMENTS OF INCOME Fiscal Year Ended December", 
-        k=10
+        "ITEM 8. FINANCIAL STATEMENTS AND SUPPLEMENTARY DATA CONSOLIDATED STATEMENTS OF OPERATIONS", 
+        k=15 
     )
 
     # Zoekopdracht 2: Focus op de business kwaliteit (Item 1 & 1A in 10-K)
@@ -88,8 +91,7 @@ def get_comprehensive_analysis(company_id):
     {MASTER_INVESTMENT_PROMPT}
     """
 
-    # Flash-1.5 is momenteel de meest stabiele keuze voor RAG-synthese
-    MODELS = ["gemini-flash-latest", "gemini-pro-latest"]
+    MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
     
     for model_name in MODELS:
         try:
@@ -125,15 +127,13 @@ def get_comprehensive_analysis(company_id):
             continue
 
 def ask_ai_question(company_id, user_question):
-    """Beantwoordt vragen en extraheert de ticker uit de company_id."""
-    # Fix: Definieer ticker voor gebruik in de prompt
+    """Beantwoordt vragen en handelt de lijst-respons van de API correct af."""
     ticker = company_id.replace("_report", "").upper()
     
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     vector_db = Chroma(persist_directory="./db", embedding_function=embeddings, collection_name=company_id)
     
     docs = vector_db.similarity_search(user_question, k=5)
-    
     context_list = []
     for d in docs:
         clean_text = clean_document_content(d)
@@ -158,18 +158,20 @@ def ask_ai_question(company_id, user_question):
     {user_question}
     """
     
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash-latest", 
-        temperature=0.3,
-        timeout=60
-    )
+    llm = ChatGoogleGenerativeAI(model="gemini-flash-lite-latest", temperature=0.3, timeout=60)
     response = llm.invoke(chat_prompt)
     
-    # Fix voor 'list object' error: dwing content naar string
-    if hasattr(response, 'content'):
-        content = str(response.content)
+    # --- FIX: TEXT EXTRACTIE UIT LIJST ---
+    raw_content = response.content if hasattr(response, 'content') else response
+    
+    if isinstance(raw_content, list):
+        final_text = ""
+        for item in raw_content:
+            if isinstance(item, dict) and 'text' in item:
+                final_text += item['text']
+        content = final_text if final_text else str(raw_content)
     else:
-        content = str(response)
+        content = str(raw_content)
         
     return content.replace("$", "\\$")
 

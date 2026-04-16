@@ -135,8 +135,7 @@ if ticker and (st.session_state.auto_analyze or check_if_indexed(ticker)):
             st.markdown(f"### 📈 Fundamentele Analyse: {ticker}")
             available_years = get_indexed_years(ticker)
             st.caption(f"Geanalyseerde periodes: {', '.join(available_years)}")
-            
-            st.info("De AI heeft specifiek gezocht naar 'Consolidated Statements' en 'Item 1A' risico's.")
+
             st.markdown(report_text)
         
         st.divider()
